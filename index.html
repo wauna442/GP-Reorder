@@ -73,6 +73,10 @@
   .hist { display:block; width:100%; text-align:left; background:#fff; border:2px solid #e3e7eb; border-radius:12px; padding:12px 14px; margin-top:10px; font-size:16px; color:var(--text); }
   .hist b { display:block; }
   .hist span { display:block; color:var(--muted); font-size:14px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:flex-end; justify-content:center; z-index:9; }
+  .modal.show { display:flex; }
+  .modal .sheet { background:#fff; width:100%; max-width:520px; border-radius:18px 18px 0 0; padding:18px 18px calc(18px + env(safe-area-inset-bottom)); max-height:92vh; overflow:auto; }
+  .modal .photo { max-height:34vh; margin-top:0; }
   .toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%);
     background:#222; color:#fff; padding:10px 18px; border-radius:20px; font-size:15px; opacity:0; transition:opacity .3s; pointer-events:none; }
   .toast.show { opacity:.92; }
@@ -92,11 +96,8 @@
       <h2>Scan the item barcode</h2>
       <div id="reader"></div>
       <div class="err" id="scanErr"></div>
-      <button class="link" id="manualBtn" type="button">Can't scan? Type the Item ID</button>
-      <div id="manualBox" style="display:none;margin-top:10px">
-        <input type="text" id="manualId" placeholder="Item ID" autocomplete="off" autocapitalize="characters">
-        <button class="btn" id="manualOk" type="button">Use this Item ID</button>
-      </div>
+      <button class="btn ghost" id="manualBtn" type="button">📷 Can't scan? Take a photo</button>
+      <input type="file" id="manualPhoto" accept="image/*" capture="environment" hidden>
     </div>
   </section>
 
@@ -110,10 +111,12 @@
       <div class="err" id="idErr"></div>
       <div id="photoBox" style="display:none">
         <img id="photoPrev" class="photo" alt="Barcode photo">
+        <div id="choiceWrap">
         <p class="q">Include this barcode photo with the order?</p>
         <div class="row choice">
           <button type="button" id="photoDiscard" class="opt">Discard photo</button>
           <button type="button" id="photoKeep" class="opt">Include photo</button>
+        </div>
         </div>
       </div>
       <div id="extrasBox" style="display:none">
@@ -225,6 +228,18 @@
 </main>
 
 <div class="viewer" id="viewer"><img id="viewerImg" alt="Barcode photo"></div>
+<div class="modal" id="nameModal">
+  <div class="sheet">
+    <h2>What is this item?</h2>
+    <img id="namePrev" class="photo" alt="Item photo">
+    <input type="text" id="manualId" placeholder="Item name or ID" autocomplete="off" autocapitalize="characters" style="margin-top:12px">
+    <div class="err" id="nameErr"></div>
+    <div class="row">
+      <button class="btn ghost" id="nameCancel" type="button">Cancel</button>
+      <button class="btn ok" id="manualOk" type="button">Continue</button>
+    </div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -233,7 +248,7 @@
   const $ = id => document.getElementById(id);
   let lines = [];
   try { lines = JSON.parse(localStorage.getItem(STORE)) || []; } catch (e) { lines = []; }
-  const blank = () => ({ id:'', qty:'', unit:'', photo:null, photoChoice:null, extras:[] });
+  const blank = () => ({ id:'', qty:'', unit:'', photo:null, photoChoice:null, extras:[], forced:false });
   let cur = blank();
   let scanner = null, scanning = false;
 
@@ -299,7 +314,8 @@
     } else {
       $('photoBox').style.display = 'none';
     }
-    setChoice(null);
+    setChoice(cur.forced && cur.photo ? 'keep' : null);
+    $('choiceWrap').style.display = cur.forced ? 'none' : 'block';
     renderExtras();
   }
   let extraUrls = [];
@@ -379,18 +395,41 @@
     if (pending) { try { cur.photo = await pending; } catch (e) {} showPhoto(); }
   }
 
-  $('manualBtn').onclick = () => { $('manualBox').style.display = 'block'; $('manualId').focus(); };
-  $('manualOk').onclick = () => {
-    const v = $('manualId').value.trim();
-    if (!v) return;
+  // Can't scan: photo is required, then the user names the item
+  let manualBlob = null, manualUrl = null;
+  $('manualBtn').onclick = () => $('manualPhoto').click();
+  $('manualPhoto').onchange = async e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      const bmp = await createImageBitmap(f, { imageOrientation:'from-image' }).catch(() => createImageBitmap(f));
+      manualBlob = await toJpeg(bmp, bmp.width, bmp.height);
+    } catch (err) { manualBlob = f; }
+    if (manualUrl) URL.revokeObjectURL(manualUrl);
+    manualUrl = URL.createObjectURL(manualBlob);
+    $('namePrev').src = manualUrl;
     $('manualId').value = '';
-    $('manualBox').style.display = 'none';
+    $('nameErr').textContent = '';
+    stopScanner();
+    $('nameModal').classList.add('show');
+    $('manualId').focus();
+  };
+  function closeName() { $('nameModal').classList.remove('show'); $('manualId').blur(); }
+  $('nameCancel').onclick = () => { closeName(); manualBlob = null; startScanner(); };
+  function nameOk() {
+    const v = $('manualId').value.trim();
+    if (!v) { $('nameErr').textContent = 'Type the item name or ID.'; $('manualId').focus(); return; }
+    closeName();
     cur = blank();
-    cur.id = v;
+    cur.id = v; cur.photo = manualBlob; cur.forced = true; manualBlob = null;
     $('scanned').value = v; $('idErr').textContent = '';
     show('s-confirm');
     showPhoto();
-  };
+  }
+  $('manualOk').onclick = nameOk;
+  $('manualId').addEventListener('keydown', e => { if (e.key === 'Enter') nameOk(); });
+  $('manualId').addEventListener('input', () => { $('nameErr').textContent = ''; });
 
   // ---------- Confirm ----------
   $('rescan').onclick = () => { cur = blank(); show('s-scan'); };
