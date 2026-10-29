@@ -53,6 +53,17 @@
   .muted { color:var(--muted); font-size:15px; }
   .err { color:var(--bad); font-size:15px; margin-top:8px; min-height:1em; }
   .link { background:none; border:0; color:var(--brand-dark); text-decoration:underline; font-size:16px; padding:10px 0 0; }
+  .photo { display:block; width:100%; max-height:260px; object-fit:contain; background:#000; border-radius:10px; margin-top:14px; transition:opacity .2s; }
+  .photo.dim { opacity:.3; }
+  .q { font-weight:600; margin:12px 0 0; }
+  .choice { margin-top:4px; }
+  .opt { margin-top:8px; padding:14px 8px; font-size:16px; font-weight:600; border-radius:12px; border:2px solid #cfd6dd; background:#fff; color:var(--text); }
+  #photoDiscard.sel { border-color:var(--bad); background:#fdecea; color:var(--bad); }
+  #photoKeep.sel { border-color:var(--brand); background:#e3f4ea; color:var(--brand-dark); }
+  img.thumb { width:48px; height:48px; object-fit:cover; border-radius:6px; display:block; cursor:pointer; background:#ddd; }
+  .viewer { position:fixed; inset:0; background:rgba(0,0,0,.9); display:none; align-items:center; justify-content:center; z-index:10; padding:16px; }
+  .viewer.show { display:flex; }
+  .viewer img { max-width:100%; max-height:100%; border-radius:8px; }
   .toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%);
     background:#222; color:#fff; padding:10px 18px; border-radius:20px; font-size:15px; opacity:0; transition:opacity .3s; pointer-events:none; }
   .toast.show { opacity:.92; }
@@ -88,6 +99,17 @@
       <input type="text" class="big" id="scanned" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Item ID">
       <p class="muted" style="margin:8px 0 0">Tap the Item ID to edit it if needed.</p>
       <div class="err" id="idErr"></div>
+      <div id="photoBox" style="display:none">
+        <img id="photoPrev" class="photo" alt="Barcode photo">
+        <p class="q">Include this barcode photo with the order?</p>
+        <div class="row choice">
+          <button type="button" id="photoDiscard" class="opt">Discard photo</button>
+          <button type="button" id="photoKeep" class="opt">Include photo</button>
+        </div>
+      </div>
+      <button class="link" id="takePhoto" type="button">📷 Take a photo of the barcode</button>
+      <input type="file" id="photoFile" accept="image/*" capture="environment" hidden>
+      <div class="err" id="photoErr"></div>
       <div class="row">
         <button class="btn ghost" id="rescan" type="button">Rescan</button>
         <button class="btn ok" id="confirmScan" type="button">Confirm</button>
@@ -134,6 +156,7 @@
         <div><span>Item ID</span><span id="rvId"></span></div>
         <div><span>Quantity</span><span id="rvQty"></span></div>
         <div><span>Unit</span><span id="rvUnit"></span></div>
+        <div><span>Photo</span><span id="rvPhoto"></span></div>
       </div>
       <div class="row">
         <button class="btn bad" id="removeLine" type="button">Remove line</button>
@@ -164,6 +187,7 @@
   </section>
 </main>
 
+<div class="viewer" id="viewer"><img id="viewerImg" alt="Barcode photo"></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -172,12 +196,14 @@
   const $ = id => document.getElementById(id);
   let lines = [];
   try { lines = JSON.parse(localStorage.getItem(STORE)) || []; } catch (e) { lines = []; }
-  let cur = { id:'', qty:'', unit:'' };
+  const blank = () => ({ id:'', qty:'', unit:'', photo:null, photoChoice:null });
+  let cur = blank();
   let scanner = null, scanning = false;
 
   const save = () => { try { localStorage.setItem(STORE, JSON.stringify(lines)); } catch (e) {} updateCount(); };
   const updateCount = () => { $('orderBtn').textContent = `Order (${lines.length})`; };
-  const toast = msg => { const t = $('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); };
+  const toast = msg => { const t = $('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2200); };
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
 
   function show(id) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -185,6 +211,82 @@
     if (id === 's-scan') startScanner(); else stopScanner();
     window.scrollTo(0, 0);
   }
+
+  // ---------- Photo storage (IndexedDB) ----------
+  let dbP = null;
+  function db() {
+    if (!dbP) dbP = new Promise((res, rej) => {
+      const r = indexedDB.open('reorder-photos', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('photos');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return dbP;
+  }
+  async function idb(mode, fn) {
+    const d = await db();
+    return new Promise((res, rej) => {
+      const tx = d.transaction('photos', mode), st = tx.objectStore('photos');
+      const req = fn(st);
+      tx.oncomplete = () => res(req && req.result);
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+  const putPhoto = (k, b) => idb('readwrite', s => s.put(b, k));
+  const getPhoto = k => idb('readonly', s => s.get(k));
+  const delPhoto = k => idb('readwrite', s => s.delete(k)).catch(() => {});
+  const clearPhotos = () => idb('readwrite', s => s.clear()).catch(() => {});
+
+  // ---------- Photo capture ----------
+  const MAX = 1280;
+  function toJpeg(src, w, h) {
+    const sc = Math.min(1, MAX / Math.max(w, h));
+    const c = document.createElement('canvas');
+    c.width = Math.round(w * sc); c.height = Math.round(h * sc);
+    c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+    return new Promise(res => c.toBlob(b => res(b), 'image/jpeg', 0.75));
+  }
+  function grabFrame() {
+    const v = document.querySelector('#reader video');
+    if (!v || !v.videoWidth) return null;
+    return toJpeg(v, v.videoWidth, v.videoHeight); // drawn immediately, before camera stops
+  }
+  let prevUrl = null;
+  function showPhoto() {
+    if (prevUrl) { URL.revokeObjectURL(prevUrl); prevUrl = null; }
+    $('photoErr').textContent = '';
+    if (cur.photo) {
+      prevUrl = URL.createObjectURL(cur.photo);
+      $('photoPrev').src = prevUrl;
+      $('photoBox').style.display = 'block';
+      $('takePhoto').textContent = 'Retake photo';
+    } else {
+      $('photoBox').style.display = 'none';
+      $('takePhoto').textContent = '📷 Take a photo of the barcode';
+    }
+    setChoice(null);
+  }
+  function setChoice(c) {
+    cur.photoChoice = c;
+    $('photoKeep').classList.toggle('sel', c === 'keep');
+    $('photoDiscard').classList.toggle('sel', c === 'discard');
+    $('photoPrev').classList.toggle('dim', c === 'discard');
+    if (c) $('photoErr').textContent = '';
+  }
+  $('photoKeep').onclick = () => setChoice('keep');
+  $('photoDiscard').onclick = () => setChoice('discard');
+  $('takePhoto').onclick = () => $('photoFile').click();
+  $('photoFile').onchange = async e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      const bmp = await createImageBitmap(f, { imageOrientation:'from-image' }).catch(() => createImageBitmap(f));
+      cur.photo = await toJpeg(bmp, bmp.width, bmp.height);
+    } catch (err) { cur.photo = f; }
+    showPhoto();
+    setChoice('keep');
+  };
 
   // ---------- Scanner ----------
   async function startScanner() {
@@ -213,12 +315,16 @@
       try { await scanner.stop(); } catch (e) {}
     }
   }
-  function onScan(text) {
+  async function onScan(text) {
     if (!scanning) return;
+    const pending = grabFrame();
     if (navigator.vibrate) navigator.vibrate(80);
-    cur = { id:text.trim(), qty:'', unit:'' };
+    cur = blank();
+    cur.id = text.trim();
     $('scanned').value = cur.id; $('idErr').textContent = '';
     show('s-confirm');
+    showPhoto();
+    if (pending) { try { cur.photo = await pending; } catch (e) {} showPhoto(); }
   }
 
   $('manualBtn').onclick = () => { $('manualBox').style.display = 'block'; $('manualId').focus(); };
@@ -227,16 +333,20 @@
     if (!v) return;
     $('manualId').value = '';
     $('manualBox').style.display = 'none';
-    cur = { id:v, qty:'', unit:'' };
+    cur = blank();
+    cur.id = v;
     $('scanned').value = v; $('idErr').textContent = '';
     show('s-confirm');
+    showPhoto();
   };
 
   // ---------- Confirm ----------
-  $('rescan').onclick = () => show('s-scan');
+  $('rescan').onclick = () => { cur = blank(); show('s-scan'); };
   $('confirmScan').onclick = () => {
     const v = $('scanned').value.trim();
     if (!v) { $('idErr').textContent = 'Item ID cannot be blank.'; $('scanned').focus(); return; }
+    if (cur.photo && !cur.photoChoice) { $('photoErr').textContent = 'Choose Include photo or Discard photo.'; return; }
+    if (cur.photoChoice === 'discard') cur.photo = null;
     cur.id = v;
     $('qty').value = '';
     $('qtyErr').textContent = '';
@@ -270,6 +380,7 @@
     $('unitErr').textContent = '';
     if (b.dataset.unit === '__custom') $('customUnit').focus();
   });
+  let rvUrl = null;
   function unitNext() {
     let u = unitChoice;
     if (u === '__custom') u = $('customUnit').value.trim();
@@ -279,16 +390,28 @@
     $('rvId').textContent = cur.id;
     $('rvQty').textContent = cur.qty;
     $('rvUnit').textContent = cur.unit;
+    if (rvUrl) { URL.revokeObjectURL(rvUrl); rvUrl = null; }
+    if (cur.photo) {
+      rvUrl = URL.createObjectURL(cur.photo);
+      $('rvPhoto').innerHTML = `<img class="thumb" src="${rvUrl}" alt="Barcode photo">`;
+    } else $('rvPhoto').textContent = 'None';
     show('s-review');
   }
   $('unitNext').onclick = unitNext;
   $('customUnit').addEventListener('keydown', e => { if (e.key === 'Enter') unitNext(); });
 
   // ---------- Review ----------
-  $('removeLine').onclick = () => { cur = { id:'', qty:'', unit:'' }; toast('Line removed'); show('s-scan'); };
-  $('addLine').onclick = () => {
-    lines.push({ ...cur });
+  $('removeLine').onclick = () => { cur = blank(); toast('Line removed'); show('s-scan'); };
+  $('addLine').onclick = async () => {
+    const uid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    let hasPhoto = false;
+    if (cur.photo) {
+      try { await putPhoto(uid, cur.photo); hasPhoto = true; }
+      catch (e) { toast('Photo could not be saved; line added without it'); }
+    }
+    lines.push({ uid, id:cur.id, qty:cur.qty, unit:cur.unit, hasPhoto });
     save();
+    cur = blank();
     $('nextCount').textContent = `${lines.length} line${lines.length === 1 ? '' : 's'} in this order.`;
     show('s-next');
   };
@@ -300,20 +423,34 @@
   $('emailOrder2').onclick = emailOrder;
 
   // ---------- Order list ----------
+  let listUrls = [];
   function renderOrder() {
+    listUrls.forEach(u => URL.revokeObjectURL(u)); listUrls = [];
     if (!lines.length) { $('orderTable').innerHTML = '<p class="muted">No lines yet.</p>'; return; }
-    const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
-    $('orderTable').innerHTML = '<table><tr><th>Item ID</th><th>Qty</th><th>Unit</th><th></th></tr>' +
+    $('orderTable').innerHTML = '<table><tr><th>Item ID</th><th>Qty</th><th>Unit</th><th>Photo</th><th></th></tr>' +
       lines.map((l, i) => `<tr><td>${esc(l.id)}</td><td>${esc(l.qty)}</td><td>${esc(l.unit)}</td>` +
+        `<td>${l.hasPhoto ? `<img class="thumb" data-p="${i}" alt="Photo">` : '<span class="muted">—</span>'}</td>` +
         `<td class="x"><button type="button" data-i="${i}" aria-label="Remove">✕</button></td></tr>`).join('') + '</table>';
+    $('orderTable').querySelectorAll('img[data-p]').forEach(async img => {
+      try {
+        const b = await getPhoto(lines[Number(img.dataset.p)].uid);
+        if (!b) { img.replaceWith(Object.assign(document.createElement('span'), { className:'muted', textContent:'—' })); return; }
+        const u = URL.createObjectURL(b); listUrls.push(u); img.src = u;
+        img.onclick = () => { $('viewerImg').src = u; $('viewer').classList.add('show'); };
+      } catch (e) {}
+    });
     $('orderTable').querySelectorAll('button[data-i]').forEach(b => b.onclick = () => {
-      lines.splice(Number(b.dataset.i), 1); save(); renderOrder();
+      const [l] = lines.splice(Number(b.dataset.i), 1);
+      if (l && l.hasPhoto) delPhoto(l.uid);
+      save(); renderOrder();
     });
   }
+  $('viewer').onclick = () => $('viewer').classList.remove('show');
   $('orderBtn').onclick = () => { renderOrder(); show('s-order'); };
+  function clearAll() { lines = []; save(); clearPhotos(); }
   $('clearOrder').onclick = () => {
     if (!lines.length || confirm('Clear all lines and start a new order?')) {
-      lines = []; save(); toast('Order cleared'); show('s-scan');
+      clearAll(); toast('Order cleared'); show('s-scan');
     }
   };
 
@@ -323,48 +460,71 @@
     return { file:`${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`,
              nice:d.toLocaleString() };
   }
-  function buildCsv() {
+  const photoName = (l, i) => `line-${String(i + 1).padStart(2, '0')}-${String(l.id).replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40)}.jpg`;
+  function buildCsv(names) {
     const q = v => { const s = String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    return 'Item ID,Quantity,Unit\r\n' + lines.map(l => [l.id, l.qty, l.unit].map(q).join(',')).join('\r\n') + '\r\n';
+    return 'Line,Item ID,Quantity,Unit,Photo\r\n' +
+      lines.map((l, i) => [i + 1, l.id, l.qty, l.unit, names[i] || ''].map(q).join(',')).join('\r\n') + '\r\n';
   }
-  function buildBody(nice) {
+  function buildBody(nice, names, photosAttached) {
     return `Re-order request - ${nice}\n\n` +
-      lines.map((l, i) => `${i + 1}. Item ID: ${l.id} | Qty: ${l.qty} | Unit: ${l.unit}`).join('\n') +
-      `\n\nTotal lines: ${lines.length}\n(CSV attached)`;
+      lines.map((l, i) => `${i + 1}. Item ID: ${l.id} | Qty: ${l.qty} | Unit: ${l.unit}` +
+        (photosAttached && names[i] ? ` | Photo: ${names[i]}` : '')).join('\n') +
+      `\n\nTotal lines: ${lines.length}\n(CSV attached${photosAttached && names.some(Boolean) ? ', with barcode photos' : ''})`;
   }
   async function emailOrder() {
     if (!lines.length) { toast('Order is empty'); return; }
     const s = stamp();
     const subject = `Re-order ${s.file}`;
-    const body = buildBody(s.nice);
-    const csv = buildCsv();
     const fname = `reorder-${s.file}.csv`;
-    let file = null;
-    try { file = new File([csv], fname, { type:'text/csv' }); } catch (e) {}
 
-    // Preferred: share sheet with the CSV attached (pick Mail / Gmail / Outlook)
-    if (file && navigator.canShare && navigator.canShare({ files:[file] })) {
+    // gather photos
+    const names = [], photoFiles = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      names[i] = '';
+      if (!l.hasPhoto) continue;
       try {
-        await navigator.share({ files:[file], title:subject, text:body });
-        afterSend();
-        return;
-      } catch (e) {
-        if (e && e.name === 'AbortError') return; // user cancelled
+        const b = await getPhoto(l.uid);
+        if (b) { names[i] = photoName(l, i); photoFiles.push(new File([b], names[i], { type:'image/jpeg' })); }
+      } catch (e) {}
+    }
+    const csv = buildCsv(names);
+    let csvFile = null;
+    try { csvFile = new File([csv], fname, { type:'text/csv' }); } catch (e) {}
+
+    // Preferred: share sheet with CSV + photos attached (pick Mail / Gmail / Outlook)
+    if (csvFile && navigator.canShare) {
+      const attempts = [];
+      if (photoFiles.length && navigator.canShare({ files:[csvFile, ...photoFiles] })) attempts.push([csvFile, ...photoFiles]);
+      if (navigator.canShare({ files:[csvFile] })) attempts.push([csvFile]);
+      for (const files of attempts) {
+        const withPhotos = files.length > 1;
+        try {
+          await navigator.share({ files, title:subject, text:buildBody(s.nice, names, withPhotos) });
+          if (photoFiles.length && !withPhotos) toast('Photos could not be attached on this phone');
+          afterSend();
+          return;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return; // user cancelled
+        }
       }
     }
     // Fallback: download the CSV, then open the default mail app with the body filled in
+    const body = buildBody(s.nice, names, false);
     const url = URL.createObjectURL(new Blob([csv], { type:'text/csv' }));
     const a = document.createElement('a');
     a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
-    alert('Your phone can\'t attach files automatically from a web page.\nThe CSV was downloaded. Attach it to the email that opens next.');
+    alert('Your phone can\'t attach files automatically from a web page.\nThe CSV was downloaded. Attach it to the email that opens next.' +
+      (photoFiles.length ? '\nBarcode photos can\'t be attached this way; they stay in the app\'s order list.' : ''));
     location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     afterSend();
   }
   function afterSend() {
     setTimeout(() => {
       if (confirm('Was the order sent? Tap OK to clear it and start a new order.')) {
-        lines = []; save(); show('s-scan');
+        clearAll(); show('s-scan');
       } else { renderOrder(); show('s-order'); }
     }, 600);
   }
