@@ -27,6 +27,8 @@
   .card { background:var(--card); border-radius:14px; padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.08); margin-bottom:14px; }
   h2 { font-size:19px; margin:0 0 12px; }
   .step { color:var(--muted); font-size:14px; margin-bottom:4px; text-transform:uppercase; letter-spacing:.04em; }
+  input.big { width:100%; border:2px solid #cfd6dd; font-family:inherit; color:inherit; }
+  input.big:focus { outline:none; border-color:var(--brand); background:#fff; }
   .big { font-size:26px; font-weight:600; word-break:break-all; padding:12px; background:var(--bg); border-radius:10px; text-align:center; }
   button.btn { display:block; width:100%; padding:16px; font-size:18px; font-weight:600; border:0; border-radius:12px; margin-top:12px; color:#fff; background:var(--ink); }
   button.btn.ok { background:var(--ok); }
@@ -83,7 +85,9 @@
     <div class="card">
       <div class="step">Step 1 of 4</div>
       <h2>Is this the right item?</h2>
-      <div class="big" id="scanned"></div>
+      <input type="text" class="big" id="scanned" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Item ID">
+      <p class="muted" style="margin:8px 0 0">Tap the Item ID to edit it if needed.</p>
+      <div class="err" id="idErr"></div>
       <div class="row">
         <button class="btn ghost" id="rescan" type="button">Rescan</button>
         <button class="btn ok" id="confirmScan" type="button">Confirm</button>
@@ -213,7 +217,7 @@
     if (!scanning) return;
     if (navigator.vibrate) navigator.vibrate(80);
     cur = { id:text.trim(), qty:'', unit:'' };
-    $('scanned').textContent = cur.id;
+    $('scanned').value = cur.id; $('idErr').textContent = '';
     show('s-confirm');
   }
 
@@ -224,13 +228,16 @@
     $('manualId').value = '';
     $('manualBox').style.display = 'none';
     cur = { id:v, qty:'', unit:'' };
-    $('scanned').textContent = v;
+    $('scanned').value = v; $('idErr').textContent = '';
     show('s-confirm');
   };
 
   // ---------- Confirm ----------
   $('rescan').onclick = () => show('s-scan');
   $('confirmScan').onclick = () => {
+    const v = $('scanned').value.trim();
+    if (!v) { $('idErr').textContent = 'Item ID cannot be blank.'; $('scanned').focus(); return; }
+    cur.id = v;
     $('qty').value = '';
     $('qtyErr').textContent = '';
     show('s-qty');
