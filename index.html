@@ -38,6 +38,8 @@
   .row { display:flex; gap:10px; }
   .row > * { flex:1; }
   input[type=text], input[type=number] { width:100%; font-size:24px; padding:14px; border:2px solid #cfd6dd; border-radius:10px; }
+  textarea { width:100%; font-size:17px; padding:12px; margin-top:6px; border:2px solid #cfd6dd; border-radius:10px; font-family:inherit; resize:vertical; }
+  textarea:focus { outline:none; border-color:var(--brand); }
   input:focus { outline:none; border-color:var(--brand); }
   .units { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
   .units button { padding:18px 8px; font-size:18px; font-weight:600; border-radius:12px; border:2px solid #cfd6dd; background:#fff; color:var(--text); }
@@ -77,6 +79,7 @@
   .modal.show { display:flex; }
   .modal .sheet { background:#fff; width:100%; max-width:520px; border-radius:18px 18px 0 0; padding:18px 18px calc(18px + env(safe-area-inset-bottom)); max-height:92vh; overflow:auto; }
   .modal .photo { max-height:34vh; margin-top:0; }
+  .cmt { color:var(--muted); font-size:13px; margin-top:2px; white-space:pre-wrap; word-break:break-word; }
   .toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%);
     background:#222; color:#fff; padding:10px 18px; border-radius:20px; font-size:15px; opacity:0; transition:opacity .3s; pointer-events:none; }
   .toast.show { opacity:.92; }
@@ -159,6 +162,8 @@
         <input type="text" id="customUnit" placeholder="Enter unit (e.g. Foot, Case)" autocomplete="off">
       </div>
       <div class="err" id="unitErr"></div>
+      <label class="q" for="comments" style="display:block;margin-top:14px">Comments <span class="muted" style="font-weight:400">(optional)</span></label>
+      <textarea id="comments" rows="3" placeholder="Notes for this line (location, color, urgency, etc.)"></textarea>
       <button class="btn" id="unitNext" type="button">Next</button>
     </div>
   </section>
@@ -172,6 +177,7 @@
         <div><span>Item ID</span><span id="rvId"></span></div>
         <div><span>Quantity</span><span id="rvQty"></span></div>
         <div><span>Unit</span><span id="rvUnit"></span></div>
+        <div><span>Comments</span><span id="rvComments"></span></div>
         <div><span>Photo</span><span id="rvPhoto"></span></div>
       </div>
       <div class="row">
@@ -248,7 +254,7 @@
   const $ = id => document.getElementById(id);
   let lines = [];
   try { lines = JSON.parse(localStorage.getItem(STORE)) || []; } catch (e) { lines = []; }
-  const blank = () => ({ id:'', qty:'', unit:'', photo:null, photoChoice:null, extras:[], forced:false });
+  const blank = () => ({ id:'', qty:'', unit:'', photo:null, photoChoice:null, extras:[], forced:false, comments:'' });
   let cur = blank();
   let scanner = null, scanning = false;
 
@@ -454,6 +460,7 @@
     selectUnit(null);
     $('customUnit').value = '';
     $('unitErr').textContent = '';
+    $('comments').value = cur.comments || '';
     show('s-unit');
   }
   $('qtyNext').onclick = qtyNext;
@@ -477,10 +484,12 @@
     if (u === '__custom') u = $('customUnit').value.trim();
     if (!u) { $('unitErr').textContent = unitChoice === '__custom' ? 'Type a unit of measure.' : 'Choose a unit.'; return; }
     cur.unit = u;
-    $('customUnit').blur();
+    cur.comments = $('comments').value.trim();
+    $('customUnit').blur(); $('comments').blur();
     $('rvId').textContent = cur.id;
     $('rvQty').textContent = cur.qty;
     $('rvUnit').textContent = cur.unit;
+    $('rvComments').textContent = cur.comments || 'None';
     if (rvUrl) [].concat(rvUrl).forEach(u => URL.revokeObjectURL(u));
     const all = [cur.photo, ...cur.extras].filter(Boolean);
     rvUrl = all.map(b => URL.createObjectURL(b));
@@ -499,7 +508,7 @@
     let photos = 0;
     try { for (let k = 0; k < all.length; k++) { await putPhoto(`${uid}-${k}`, all[k]); photos++; } }
     catch (e) { toast('Some photos could not be saved'); }
-    lines.push({ uid, id:cur.id, qty:cur.qty, unit:cur.unit, photos });
+    lines.push({ uid, id:cur.id, qty:cur.qty, unit:cur.unit, comments:cur.comments, photos });
     save();
     cur = blank();
     $('nextCount').textContent = `${lines.length} line${lines.length === 1 ? '' : 's'} in this order.`;
@@ -515,7 +524,7 @@
   function lineTable(el, list, onRemove) {
     if (!list.length) { el.innerHTML = '<p class="muted">No lines yet.</p>'; return; }
     el.innerHTML = '<table><tr><th>Item ID</th><th>Qty</th><th>UOM</th><th>Photo</th>' + (onRemove ? '<th></th>' : '') + '</tr>' +
-      list.map((l, i) => `<tr><td>${esc(l.id)}</td><td>${esc(l.qty)}</td><td>${esc(l.unit)}</td>` +
+      list.map((l, i) => `<tr><td>${esc(l.id)}${l.comments ? `<div class="cmt">${esc(l.comments)}</div>` : ''}</td><td>${esc(l.qty)}</td><td>${esc(l.unit)}</td>` +
         `<td>${photoKeys(l).length ? '<span class="thumbs">' + photoKeys(l).map(k => `<img class="thumb" data-k="${esc(k)}" alt="Photo">`).join('') + '</span>' : '<span class="muted">—</span>'}</td>` +
         (onRemove ? `<td class="x"><button type="button" data-i="${i}" aria-label="Remove">✕</button></td>` : '') + '</tr>').join('') + '</table>';
     el.querySelectorAll('img[data-k]').forEach(async img => {
@@ -596,7 +605,7 @@
       for (const k of photoKeys(l)) {
         try { const b = await getPhoto(k); if (b) { await putPhoto(`${uid}-${photos}`, b); photos++; } } catch (e) {}
       }
-      lines.push({ uid, id:l.id, qty:l.qty, unit:l.unit, photos });
+      lines.push({ uid, id:l.id, qty:l.qty, unit:l.unit, comments:l.comments || '', photos });
     }
     save(); renderOrder(); show('s-order');
     toast('Lines copied. Adjust or remove any before sending.');
@@ -616,13 +625,15 @@
   const photoName = (l, i, k) => `line-${String(i + 1).padStart(2, '0')}-${String(l.id).replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40)}${k ? '-' + (k + 1) : ''}.jpg`;
   function buildCsv(list, names) {
     const q = v => { const s = String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    return 'Line,Item ID,Quantity,UOM,Photos\r\n' +
-      list.map((l, i) => [i + 1, l.id, l.qty, l.unit, names[i] || ''].map(q).join(',')).join('\r\n') + '\r\n';
+    return 'Line,Item ID,Quantity,UOM,Comments,Photos\r\n' +
+      list.map((l, i) => [i + 1, l.id, l.qty, l.unit, l.comments || '', names[i] || ''].map(q).join(',')).join('\r\n') + '\r\n';
   }
   function buildBody(list, nice, names, photosAttached) {
     const showPhotos = photosAttached && names.some(Boolean);
-    const head = ['#', 'Item ID', 'Quantity', 'UOM'].concat(showPhotos ? ['Photos'] : []);
+    const showCmt = list.some(l => l.comments);
+    const head = ['#', 'Item ID', 'Quantity', 'UOM'].concat(showCmt ? ['Comments'] : [], showPhotos ? ['Photos'] : []);
     const rows = list.map((l, i) => [String(i + 1), String(l.id), String(l.qty), String(l.unit)]
+      .concat(showCmt ? [String(l.comments || '').replace(/\s*\n\s*/g, ' / ')] : [])
       .concat(showPhotos ? [names[i] ? String(names[i].split('; ').length) : '0'] : []));
     const w = head.map((h, c) => Math.max(h.length, ...rows.map(r => r[c].length)));
     const fmt = r => '| ' + r.map((v, c) => v.padEnd(w[c])).join(' | ') + ' |';
