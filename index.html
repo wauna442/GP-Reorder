@@ -487,14 +487,20 @@
   const photoName = (l, i, k) => `line-${String(i + 1).padStart(2, '0')}-${String(l.id).replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40)}${k ? '-' + (k + 1) : ''}.jpg`;
   function buildCsv(names) {
     const q = v => { const s = String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    return 'Line,Item ID,Quantity,Unit,Photos\r\n' +
+    return 'Line,Item ID,Quantity,UOM,Photos\r\n' +
       lines.map((l, i) => [i + 1, l.id, l.qty, l.unit, names[i] || ''].map(q).join(',')).join('\r\n') + '\r\n';
   }
   function buildBody(nice, names, photosAttached) {
+    const showPhotos = photosAttached && names.some(Boolean);
+    const head = ['#', 'Item ID', 'Quantity', 'UOM'].concat(showPhotos ? ['Photos'] : []);
+    const rows = lines.map((l, i) => [String(i + 1), String(l.id), String(l.qty), String(l.unit)]
+      .concat(showPhotos ? [names[i] ? String(names[i].split('; ').length) : '0'] : []));
+    const w = head.map((h, c) => Math.max(h.length, ...rows.map(r => r[c].length)));
+    const fmt = r => '| ' + r.map((v, c) => v.padEnd(w[c])).join(' | ') + ' |';
+    const rule = '|' + w.map(n => '-'.repeat(n + 2)).join('|') + '|';
     return `Re-order request - ${nice}\n\n` +
-      lines.map((l, i) => `${i + 1}. Item ID: ${l.id} | Qty: ${l.qty} | Unit: ${l.unit}` +
-        (photosAttached && names[i] ? ` | Photos: ${names[i]}` : '')).join('\n') +
-      `\n\nTotal lines: ${lines.length}\n(CSV attached${photosAttached && names.some(Boolean) ? ', with barcode photos' : ''})`;
+      [fmt(head), rule, ...rows.map(fmt)].join('\n') +
+      `\n\nTotal lines: ${lines.length}\n(CSV attached${showPhotos ? ', with barcode photos' : ''})`;
   }
   async function emailOrder() {
     if (!lines.length) { toast('Order is empty'); return; }
