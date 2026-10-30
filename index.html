@@ -80,6 +80,8 @@
   .modal .sheet { background:#fff; width:100%; max-width:520px; border-radius:18px 18px 0 0; padding:18px 18px calc(18px + env(safe-area-inset-bottom)); max-height:92vh; overflow:auto; }
   .modal .photo { max-height:34vh; margin-top:0; }
   .cmt { color:var(--muted); font-size:13px; margin-top:2px; white-space:pre-wrap; word-break:break-word; }
+  .seg .opt.sel { border-color:var(--brand); background:#e3f4ea; color:var(--brand-dark); }
+  .hist .tag { color:var(--brand-dark); font-weight:600; }
   .toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%);
     background:#222; color:#fff; padding:10px 18px; border-radius:20px; font-size:15px; opacity:0; transition:opacity .3s; pointer-events:none; }
   .toast.show { opacity:.92; }
@@ -224,6 +226,7 @@
     <div class="card">
       <div class="step">Sent order</div>
       <h2 id="hdTitle"></h2>
+      <p class="muted" id="hdMeta" style="margin-top:-6px"></p>
       <div id="hdTable"></div>
       <button class="btn" id="hdReorder" type="button">Reorder (copy to new order)</button>
       <button class="btn ok" id="hdEmail" type="button">E-Mail again</button>
@@ -243,6 +246,28 @@
     <div class="row">
       <button class="btn ghost" id="nameCancel" type="button">Cancel</button>
       <button class="btn ok" id="manualOk" type="button">Continue</button>
+    </div>
+  </div>
+</div>
+<div class="modal" id="emailModal">
+  <div class="sheet">
+    <h2>Send request</h2>
+    <p class="q" style="margin-top:0">Is this a quote or an order?</p>
+    <div class="row seg" id="emKind">
+      <button type="button" class="opt" data-v="Quote">Quote</button>
+      <button type="button" class="opt" data-v="Order">Order</button>
+    </div>
+    <p class="q">Reference</p>
+    <div class="row seg" id="emRefType">
+      <button type="button" class="opt" data-v="Project Code">Project Code</button>
+      <button type="button" class="opt" data-v="PO Number">PO Number</button>
+    </div>
+    <label class="q" id="emRefLabel" for="emRef" style="display:block">Project Code / PO Number</label>
+    <input type="text" id="emRef" autocomplete="off" autocapitalize="characters" style="margin-top:6px">
+    <div class="err" id="emErr"></div>
+    <div class="row">
+      <button class="btn ghost" id="emCancel" type="button">Cancel</button>
+      <button class="btn ok" id="emSend" type="button">Continue</button>
     </div>
   </div>
 </div>
@@ -562,9 +587,9 @@
   let history = [];
   try { history = JSON.parse(localStorage.getItem(HIST)) || []; } catch (e) { history = []; }
   const saveHist = () => { try { localStorage.setItem(HIST, JSON.stringify(history)); } catch (e) {} };
-  function archiveCurrent() {
+  function archiveCurrent(meta) {
     if (!lines.length) return;
-    history.unshift({ hid:Date.now().toString(36), sentAt:new Date().toISOString(), lines:lines.map(l => ({ ...l })) });
+    history.unshift({ hid:Date.now().toString(36), sentAt:new Date().toISOString(), ...(meta || {}), lines:lines.map(l => ({ ...l })) });
     while (history.length > HIST_MAX) {
       const old = history.pop();
       old.lines.forEach(l => photoKeys(l).forEach(delPhoto));
@@ -577,7 +602,8 @@
     if (!history.length) { $('histList').innerHTML = '<p class="muted">No sent orders yet. Orders appear here after you e-mail them.</p>'; return; }
     $('histList').innerHTML = history.map((h, i) => {
       const preview = h.lines.slice(0, 3).map(l => esc(l.id)).join(', ') + (h.lines.length > 3 ? ', …' : '');
-      return `<button type="button" class="hist" data-h="${i}"><b>${esc(when(h.sentAt))}</b>` +
+      const tag = h.kind ? `${esc(h.kind)} · ${esc(h.refType)} ${esc(h.ref)}` : '';
+      return `<button type="button" class="hist" data-h="${i}"><b>${esc(when(h.sentAt))}</b>` + (tag ? `<span class="tag">${tag}</span>` : '') +
         `<span>${h.lines.length} line${h.lines.length === 1 ? '' : 's'} · ${preview}</span></button>`;
     }).join('');
     $('histList').querySelectorAll('button[data-h]').forEach(b => b.onclick = () => openHist(Number(b.dataset.h)));
@@ -586,6 +612,7 @@
   function openHist(i) {
     curHist = history[i];
     $('hdTitle').textContent = when(curHist.sentAt);
+    $('hdMeta').textContent = curHist.kind ? `${curHist.kind} · ${curHist.refType}: ${curHist.ref}` : '';
     freeUrls();
     lineTable($('hdTable'), curHist.lines, null);
     show('s-hdetail');
@@ -595,7 +622,7 @@
   $('histBtn2').onclick = openHistory;
   $('hdBack').onclick = openHistory;
   $('histBack').onclick = () => show('s-scan');
-  $('hdEmail').onclick = () => curHist && emailOrder(curHist.lines, false);
+  $('hdEmail').onclick = () => curHist && emailOrder(curHist.lines, false, curHist);
   $('hdReorder').onclick = async () => {
     if (!curHist) return;
     if (lines.length && !confirm(`Add these ${curHist.lines.length} lines to your current order (${lines.length} lines)?`)) return;
@@ -623,32 +650,45 @@
              nice:d.toLocaleString() };
   }
   const photoName = (l, i, k) => `line-${String(i + 1).padStart(2, '0')}-${String(l.id).replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40)}${k ? '-' + (k + 1) : ''}.jpg`;
-  function buildCsv(list, names) {
+  const safe = v => String(v).replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 30);
+  function buildCsv(list, names, meta) {
     const q = v => { const s = String(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    return 'Line,Item ID,Quantity,UOM,Comments,Photos\r\n' +
-      list.map((l, i) => [i + 1, l.id, l.qty, l.unit, l.comments || '', names[i] || ''].map(q).join(',')).join('\r\n') + '\r\n';
+    return 'Request Type,' + q(meta.refType) + ',Line,Item ID,Quantity,UOM,Comments,Photos\r\n' +
+      list.map((l, i) => [meta.kind, meta.ref, i + 1, l.id, l.qty, l.unit, l.comments || '', names[i] || ''].map(q).join(',')).join('\r\n') + '\r\n';
   }
-  function buildBody(list, nice, names, photosAttached) {
+  function buildBody(list, nice, names, photosAttached, meta) {
     const showPhotos = photosAttached && names.some(Boolean);
     const showCmt = list.some(l => l.comments);
+    const clean = v => String(v || '').replace(/\s*[\t\r\n]+\s*/g, ' ').trim();
     const head = ['#', 'Item ID', 'Quantity', 'UOM'].concat(showCmt ? ['Comments'] : [], showPhotos ? ['Photos'] : []);
-    const rows = list.map((l, i) => [String(i + 1), String(l.id), String(l.qty), String(l.unit)]
-      .concat(showCmt ? [String(l.comments || '').replace(/\s*\n\s*/g, ' / ')] : [])
+    const rows = list.map((l, i) => [String(i + 1), clean(l.id), clean(l.qty), clean(l.unit)]
+      .concat(showCmt ? [clean(l.comments)] : [])
       .concat(showPhotos ? [names[i] ? String(names[i].split('; ').length) : '0'] : []));
-    const w = head.map((h, c) => Math.max(h.length, ...rows.map(r => r[c].length)));
-    const fmt = r => '| ' + r.map((v, c) => v.padEnd(w[c])).join(' | ') + ' |';
-    const rule = '|' + w.map(n => '-'.repeat(n + 2)).join('|') + '|';
-    return `Re-order request - ${nice}\n\n` +
-      [fmt(head), rule, ...rows.map(fmt)].join('\n') +
+    return `${meta.kind} Request\n${meta.refType}: ${meta.ref}\nDate: ${nice}\n\n` +
+      [head, ...rows].map(r => r.join('\t')).join('\n') +
       `\n\nTotal lines: ${list.length}\n(CSV attached${showPhotos ? ', with barcode photos' : ''})`;
   }
-  // isCurrent: true = the order being built (offer to archive after); false = re-send from history
-  async function emailOrder(list, isCurrent) {
-    if (!list.length) { toast('Order is empty'); return; }
-    const s = stamp();
-    const subject = `Re-order ${s.file}`;
-    const fname = `reorder-${s.file}.csv`;
 
+  // ----- Quote / Order + Project Code / PO prompt -----
+  let pending = null; // { list, isCurrent, prep:Promise }
+  const defaultRefType = k => k === 'Quote' ? 'Project Code' : 'PO Number';
+  function setKind(k) {
+    $('emKind').dataset.v = k || '';
+    $('emKind').querySelectorAll('button').forEach(b => b.classList.toggle('sel', b.dataset.v === k));
+    if (k && !$('emRefType').dataset.touched) setRefType(defaultRefType(k));
+  }
+  function setRefType(t) {
+    $('emRefType').dataset.v = t || '';
+    $('emRefType').querySelectorAll('button').forEach(b => b.classList.toggle('sel', b.dataset.v === t));
+    $('emRefLabel').textContent = t || 'Project Code / PO Number';
+    $('emRef').placeholder = t === 'PO Number' ? 'e.g. PO-45821' : 'e.g. 2026-114';
+  }
+  $('emKind').querySelectorAll('button').forEach(b => b.onclick = () => { setKind(b.dataset.v); $('emErr').textContent = ''; });
+  $('emRefType').querySelectorAll('button').forEach(b => b.onclick = () => { $('emRefType').dataset.touched = '1'; setRefType(b.dataset.v); $('emErr').textContent = ''; });
+  $('emRef').addEventListener('input', () => { $('emErr').textContent = ''; });
+
+  // Load photos and build files ahead of time, so sharing happens right on the Send tap
+  async function prepFiles(list) {
     const names = [], photoFiles = [];
     for (let i = 0; i < list.length; i++) {
       const l = list[i], got = [];
@@ -660,7 +700,39 @@
       }
       names[i] = got.join('; ');
     }
-    const csv = buildCsv(list, names);
+    return { names, photoFiles };
+  }
+
+  // isCurrent: true = the order being built (offer to archive after); false = re-send from history
+  function emailOrder(list, isCurrent, prev) {
+    if (!list.length) { toast('Order is empty'); return; }
+    pending = { list, isCurrent, prep:prepFiles(list) };
+    delete $('emRefType').dataset.touched;
+    setKind(prev && prev.kind || null);
+    setRefType(prev && prev.refType || null);
+    if (prev && prev.refType) $('emRefType').dataset.touched = '1';
+    $('emRef').value = prev && prev.ref || '';
+    $('emErr').textContent = '';
+    $('emailModal').classList.add('show');
+  }
+  $('emCancel').onclick = () => { $('emailModal').classList.remove('show'); $('emRef').blur(); pending = null; };
+  $('emSend').onclick = async () => {
+    const kind = $('emKind').dataset.v, refType = $('emRefType').dataset.v, ref = $('emRef').value.trim();
+    if (!kind) { $('emErr').textContent = 'Choose Quote or Order.'; return; }
+    if (!refType) { $('emErr').textContent = 'Choose Project Code or PO Number.'; return; }
+    if (!ref) { $('emErr').textContent = `Enter the ${refType}.`; $('emRef').focus(); return; }
+    $('emRef').blur();
+    $('emailModal').classList.remove('show');
+    const p = pending; pending = null;
+    if (p) await sendEmail(p.list, p.isCurrent, await p.prep, { kind, refType, ref });
+  };
+
+  async function sendEmail(list, isCurrent, prep, meta) {
+    const s = stamp();
+    const subject = `${meta.kind} Request - ${meta.refType} ${meta.ref}`;
+    const fname = `${meta.kind.toLowerCase()}-${safe(meta.ref)}-${s.file}.csv`;
+    const { names, photoFiles } = prep;
+    const csv = buildCsv(list, names, meta);
     let csvFile = null;
     try { csvFile = new File([csv], fname, { type:'text/csv' }); } catch (e) {}
 
@@ -672,9 +744,9 @@
       for (const files of attempts) {
         const withPhotos = files.length > 1;
         try {
-          await navigator.share({ files, title:subject, text:buildBody(list, s.nice, names, withPhotos) });
+          await navigator.share({ files, title:subject, text:buildBody(list, s.nice, names, withPhotos, meta) });
           if (photoFiles.length && !withPhotos) toast('Photos could not be attached on this phone');
-          afterSend(isCurrent);
+          afterSend(isCurrent, meta);
           return;
         } catch (e) {
           if (e && e.name === 'AbortError') return; // user cancelled
@@ -682,7 +754,7 @@
       }
     }
     // Fallback: download the CSV, then open the default mail app with the body filled in
-    const body = buildBody(list, s.nice, names, false);
+    const body = buildBody(list, s.nice, names, false, meta);
     const url = URL.createObjectURL(new Blob([csv], { type:'text/csv' }));
     const a = document.createElement('a');
     a.href = url; a.download = fname; document.body.appendChild(a); a.click(); a.remove();
@@ -690,13 +762,13 @@
     alert('Your phone can\'t attach files automatically from a web page.\nThe CSV was downloaded. Attach it to the email that opens next.' +
       (photoFiles.length ? '\nBarcode photos can\'t be attached this way; they stay in the app.' : ''));
     location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    afterSend(isCurrent);
+    afterSend(isCurrent, meta);
   }
-  function afterSend(isCurrent) {
+  function afterSend(isCurrent, meta) {
     if (!isCurrent) return;
     setTimeout(() => {
-      if (confirm('Was the order sent? Tap OK to save it to Recent Orders and start a new order.')) {
-        archiveCurrent(); toast('Saved to Recent Orders'); show('s-scan');
+      if (confirm(`Was the ${meta.kind.toLowerCase()} sent? Tap OK to save it to Recent Orders and start a new one.`)) {
+        archiveCurrent(meta); toast('Saved to Recent Orders'); show('s-scan');
       } else { renderOrder(); show('s-order'); }
     }, 600);
   }
